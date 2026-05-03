@@ -2,125 +2,44 @@
 import fastify from 'fastify';
 import { Client } from 'pg';
 
-const app = fastify({ logger: false });
+async function main() {
+  const dbUrl = process.env.DATABASE_URL;
+  const client = new Client({ connectionString: dbUrl });
+  await client.connect();
 
-const DB_URL = process.env.DATABASE_URL || '';
-const client = new Client({ connectionString: DB_URL });
-let dbReady = false;
-async function ensureDb() {
-  if (dbReady) return;
-  try {
-    await client.connect();
-    dbReady = true;
-  } catch (e) {
-    console.warn('DB connect error, retrying...');
-    setTimeout(ensureDb, 2000);
-  }
-}
-ensureDb();
+  const helpers = {
+    client,
+    async markStatus(name: string, status: string, errorText: string = '') {
+      await client.query(
+        `UPDATE nodes SET status=$1, last_loaded_at=now(), error_text=$2, load_count=load_count+1 WHERE name=$3`,
+        [status, errorText, name]
+      );
+    },
+  };
 
-type NodeRec = {
-  id: string;
-  name: string;
-  version: number;
-  code: string;
-  plugin?: Function;
-};
+  const app = fastify();
 
-const loaded: Record<string, NodeRec> = {};
-let lastRefresh = new Date().toISOString();
-
-async function fetchActive() {
-  await ensureDb();
-  const res = await client.query(
-    `SELECT id, name, version, code_text FROM nodes WHERE active = true`
+  let res = await client.query(
+    `SELECT code_text FROM nodes WHERE name='_shell_orchestrator' AND active=true AND (status='deployed' OR status='pending') ORDER BY version DESC LIMIT 1`
   );
-  return res.rows as { id: string; name: string; version: number; code_text: string }[];
+
+  if (res.rowCount === 0) {
+    res = await client.query(
+      `SELECT code_text FROM nodes WHERE name='_shell_orchestrator' ORDER BY version DESC LIMIT 1`
+    );
+  }
+
+  const code = res.rows[0]?.code_text;
+  if (!code) throw new Error('No orchestrator code found');
+
+  await helpers.markStatus('_shell_orchestrator', 'deploying');
+  const mod = { exports: {} };
+  const fn = new Function('module', 'exports', 'require', 'app', 'helpers', code);
+  await fn(mod, mod.exports, require, app, helpers);
+  await helpers.markStatus('_shell_orchestrator', 'deployed');
 }
 
-function makePlugin(code: string, name: string) {
-  try {
-    const fn = new Function('module', 'exports', code);
-    const mod = { exports: {} };
-    fn(mod, mod.exports);
-    const register = mod.exports;
-    if (typeof register !== 'function') throw new Error('no export function');
-    const plugin = (appInstance: any, opts: any, done: any) => {
-      try {
-        register(appInstance);
-      } catch (e) {
-        console.warn(`Node ${name} register error:`, e);
-      }
-      done();
-    };
-    return plugin;
-  } catch (e) {
-    console.warn(`Node ${name} eval error:`, e);
-    return null;
-  }
-}
-
-async function syncNodes() {
-  const rows = await fetchActive();
-  const seen = new Set<string>();
-  for (const row of rows) {
-    const { id, name, version, code_text } = row;
-    seen.add(name);
-    const existing = loaded[name];
-    if (!existing) {
-      const plugin = makePlugin(code_text, name);
-      if (plugin) {
-        app.register(plugin);
-        loaded[name] = { id, name, version, code: code_text, plugin };
-        console.log(`Loaded node ${name}@${version}`);
-      }
-    } else if (existing.version !== version) {
-      if (existing.plugin) app.unregister(existing.plugin);
-      const plugin = makePlugin(code_text, name);
-      if (plugin) {
-        app.register(plugin);
-        loaded[name] = { id, name, version, code: code_text, plugin };
-        console.log(`Reloaded node ${name}@${version}`);
-      }
-    }
-  }
-  // unload removed nodes
-  for (const name of Object.keys(loaded)) {
-    if (!seen.has(name)) {
-      const rec = loaded[name];
-      if (rec.plugin) app.unregister(rec.plugin);
-      delete loaded[name];
-      console.log(`Unloaded node ${name}`);
-    }
-  }
-  lastRefresh = new Date().toISOString();
-}
-
-app.post('/__refresh', async (req, reply) => {
-  try {
-    await syncNodes();
-    reply.send({ ok: true });
-  } catch (e) {
-    console.warn('Refresh error:', e);
-    reply.code(500).send({ ok: false });
-  }
-});
-
-app.get('/__health', async (req, reply) => {
-  reply.send({
-    ok: true,
-    nodes_loaded: Object.keys(loaded).length,
-    last_refresh: lastRefresh,
-  });
-});
-
-setInterval(() => {
-  syncNodes().catch((e) => console.warn('Periodic sync error:', e));
-}, 60_000);
-
-syncNodes().catch((e) => console.warn('Initial load error:', e));
-
-const PORT = Number(process.env.PORT) || 3000;
-app.listen({ port: PORT, host: '0.0.0.0' }).then(() => {
-  console.log(`Server listening on ${PORT}`);
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
 });
