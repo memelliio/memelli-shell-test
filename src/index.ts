@@ -1,4 +1,4 @@
-@ts-nocheck
+// @ts-nocheck
 import fastify from 'fastify';
 import { Client } from 'pg';
 
