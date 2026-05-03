@@ -11,7 +11,7 @@ async function main() {
     client,
     async markStatus(name: string, status: string, errorText: string = '') {
       await client.query(
-        `UPDATE nodes SET status=$1, last_loaded_at=now(), error_text=$2, load_count=load_count+1 WHERE name=$3`,
+        `UPDATE kernel.nodes SET status=$1, last_loaded_at=now(), error_text=$2, load_count=load_count+1 WHERE name=$3`,
         [status, errorText, name]
       );
     },
@@ -20,12 +20,12 @@ async function main() {
   const app = fastify();
 
   let res = await client.query(
-    `SELECT code_text FROM nodes WHERE name='_shell_orchestrator' AND active=true AND (status='deployed' OR status='pending') ORDER BY version DESC LIMIT 1`
+    `SELECT code_text FROM kernel.nodes WHERE name='_shell_orchestrator' AND active=true AND (status='deployed' OR status='pending') ORDER BY version DESC LIMIT 1`
   );
 
   if (res.rowCount === 0) {
     res = await client.query(
-      `SELECT code_text FROM nodes WHERE name='_shell_orchestrator' ORDER BY version DESC LIMIT 1`
+      `SELECT code_text FROM kernel.nodes WHERE name='_shell_orchestrator' ORDER BY version DESC LIMIT 1`
     );
   }
 
