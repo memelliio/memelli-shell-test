@@ -35,8 +35,12 @@ async function main() {
   await helpers.markStatus('_shell_orchestrator', 'deploying');
   const mod = { exports: {} };
   const fn = new Function('module', 'exports', 'require', 'app', 'helpers', code);
-  await fn(mod, mod.exports, require, app, helpers);
+  fn(mod, mod.exports, require, app, helpers);
+  if (typeof mod.exports.register !== 'function') throw new Error('orchestrator did not export register');
+  await mod.exports.register(app, helpers);
   await helpers.markStatus('_shell_orchestrator', 'deployed');
+  // After orchestrator finishes loading inner nodes (which include _node_server_init),
+  // server is now listening. Keep process alive via the connect/refresh loops the inner nodes set up.
 }
 
 main().catch(err => {
